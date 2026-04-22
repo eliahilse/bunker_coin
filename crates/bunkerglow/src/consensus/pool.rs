@@ -100,6 +100,12 @@ pub trait Pool {
     async fn add_block(&mut self, block_id: BlockId, parent_id: BlockId);
     async fn recover_from_standstill(&self);
     fn finalized_slot(&self) -> Slot;
+    fn has_notar_or_fallback_cert(&self, slot: Slot) -> bool;
+    fn has_final_cert(&self, slot: Slot) -> bool;
+    fn has_notar_cert(&self, slot: Slot) -> bool;
+    fn has_skip_cert(&self, slot: Slot) -> bool;
+    fn slot_states_len(&self) -> usize;
+    fn prune_old_slots(&mut self);
     fn parents_ready(&self, slot: Slot) -> &[BlockId];
     fn wait_for_parent_ready(&mut self, slot: Slot) -> Either<BlockId, oneshot::Receiver<BlockId>>;
 }
@@ -640,6 +646,30 @@ impl Pool for PoolImpl {
     /// Gives the currently highest finalized (fast or slow) slot.
     fn finalized_slot(&self) -> Slot {
         self.finality_tracker.highest_finalized_slot()
+    }
+
+    fn has_notar_or_fallback_cert(&self, slot: Slot) -> bool {
+        self.has_notar_or_fallback_cert(slot)
+    }
+
+    fn has_final_cert(&self, slot: Slot) -> bool {
+        self.has_final_cert(slot)
+    }
+
+    fn has_notar_cert(&self, slot: Slot) -> bool {
+        self.has_notar_cert(slot)
+    }
+
+    fn has_skip_cert(&self, slot: Slot) -> bool {
+        self.has_skip_cert(slot)
+    }
+
+    fn slot_states_len(&self) -> usize {
+        self.slot_states_len()
+    }
+
+    fn prune_old_slots(&mut self) {
+        self.prune();
     }
 
     /// Returns all possible parents for the given slot that are ready.

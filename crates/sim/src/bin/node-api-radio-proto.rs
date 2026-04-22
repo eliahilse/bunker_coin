@@ -1,9 +1,8 @@
 //! multi-node radio simulation for BunkerCoin
 
 use bunker_coin_core::execution::State as ExecutionState;
-use bunker_coin_radio::RadioConfig;
 use bunker_coin_sim::scenarios;
-use rpc::{run_api, Block, NodeStatus, RadioStats, SharedState, WebSocketUpdate};
+use rpc::{run_api, RadioStats, SharedState};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task;
@@ -12,7 +11,15 @@ use tokio::task;
 async fn main() {
     env_logger::init();
 
+    let data_dir = std::env::temp_dir().join(format!(
+        "bunker-coin-node-api-radio-proto-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&data_dir).expect("create isolated node data directory");
+    std::env::set_current_dir(&data_dir).expect("switch to isolated node data directory");
+
     log::info!("=== BunkerCoin Node Starting ===");
+    log::info!("Using isolated data directory: {}", data_dir.display());
     log::info!("Radio simulation with 4.8 kbps bandwidth");
     log::info!("Starting API server on port 3001...");
 

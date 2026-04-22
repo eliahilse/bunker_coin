@@ -77,11 +77,14 @@ impl SimulatedNetworkCore {
                 {
                     let msg = guard.pop().unwrap();
                     let n_guard = n.read().await;
-                    let channel = n_guard.get(&msg.to).unwrap();
-                    if let Err(_e) = channel.send(msg).await {
-                        #[cfg(test)]
-                        println!("sending failed. Ignoring");
-                        warn!("sending failed. Ignoring");
+                    if let Some(channel) = n_guard.get(&msg.to) {
+                        if let Err(_e) = channel.send(msg).await {
+                            #[cfg(test)]
+                            println!("sending failed. Ignoring");
+                            warn!("sending failed. Ignoring");
+                        }
+                    } else {
+                        warn!("dropping packet for unregistered simulated node {}", msg.to);
                     }
                 }
             }
