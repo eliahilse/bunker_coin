@@ -570,8 +570,8 @@ pub async fn multi_node_consensus_simulation_with_api(
                     let is_skip_certified = pool_guard.has_skip_cert(slot_id);
                     let is_finalized = pool_guard.has_final_cert(slot_id);
                     let is_notarized = pool_guard.has_notar_cert(slot_id);
-                    let is_notarized_fallback = pool_guard.has_notar_or_fallback_cert(slot_id)
-                        && !is_notarized;
+                    let is_notarized_fallback =
+                        pool_guard.has_notar_or_fallback_cert(slot_id) && !is_notarized;
 
                     if slot == 61 {
                         println!("\nfull logging slot >> {}", slot);
