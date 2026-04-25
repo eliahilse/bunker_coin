@@ -251,7 +251,7 @@ pub struct SharedState {
     pub nodes: Arc<RwLock<Vec<NodeStatus>>>,
     pub radio_stats: Arc<RwLock<RadioStats>>,
     pub updates: broadcast::Sender<WebSocketUpdate>,
-    pub blockstore: Option<Arc<RwLock<dyn Blockstore + Send + Sync>>>,
+    pub blockstore: Option<Arc<RwLock<Box<dyn Blockstore + Send + Sync>>>>,
     pub mempool: Arc<RwLock<Vec<MempoolEntry>>>,
     pub tx_sender: Option<mpsc::UnboundedSender<CoreTransaction>>,
     pub execution_state: Arc<RwLock<ExecutionState>>,
@@ -1200,6 +1200,14 @@ pub async fn run_api(state: SharedState) {
         .route("/ws", get(websocket_handler))
         .layer(cors)
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:3001").await {
+        Ok(listener) => listener,
+        Err(err) => {
+            eprintln!("failed to bind API server on 127.0.0.1:3001: {err}");
+            return;
+        }
+    };
+    if let Err(err) = axum::serve(listener, app).await {
+        eprintln!("API server stopped with error: {err}");
+    }
 }

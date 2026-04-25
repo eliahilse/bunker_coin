@@ -2,16 +2,16 @@
 
 use bincode;
 use bunker_coin_radio::{
-    Network as RadioNetwork, NetworkMessage, RadioConfig, RadioNetworkCore, SimulatedRadioNetwork,
+    Network as RadioNetwork, NetworkMessage, RadioConfig, SimulatedRadioNetwork,
 };
+use bunkerglow::crypto::merkle::{DoubleMerkleRoot, MerkleRoot};
 use bunkerglow::crypto::signature::SecretKey;
-use bunkerglow::shredder::{RegularShredder, Shredder, Slice, MAX_DATA_PER_SLICE};
+use bunkerglow::shredder::{RegularShredder, Shredder};
+use bunkerglow::types::slice::create_slice_with_invalid_txs;
+use bunkerglow::Slot;
 use hex;
 use rpc;
-use std::sync::Arc;
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 
 pub async fn basic_consensus_test(config: RadioConfig, num_validators: u64) {
     println!(
@@ -34,21 +34,16 @@ pub async fn basic_consensus_test(config: RadioConfig, num_validators: u64) {
     println!("\nTest 2: Testing shred creation");
 
     let data_size = 1024;
-    let slice = Slice {
-        slot: 1,
-        slice_index: 0,
-        is_last: true,
-        merkle_root: None,
-        data: vec![0x42; data_size],
-    };
+    let slice = create_slice_with_invalid_txs(data_size);
 
     let sk = SecretKey::new(&mut rand::rng());
-    let shreds = RegularShredder::shred(&slice, &sk).unwrap();
+    let mut shredder = RegularShredder::default();
+    let shreds = shredder.shred(slice, &sk).unwrap();
 
     println!("✓ Created {} shreds from {} bytes", shreds.len(), data_size);
 
     if let Some(first_shred) = shreds.first() {
-        let shred_size = bincode::serde::encode_to_vec(first_shred, bincode::config::standard())
+        let shred_size = wincode::serialize(&**first_shred)
             .map(|v| v.len())
             .unwrap_or(0);
         println!(
@@ -115,16 +110,11 @@ pub async fn bandwidth_test(config: RadioConfig) {
     for size in test_sizes {
         println!("\ntesting with {} bytes of data >>>", size);
 
-        let slice = Slice {
-            slot: 1,
-            slice_index: 0,
-            is_last: true,
-            merkle_root: None,
-            data: vec![0x55; size],
-        };
+        let slice = create_slice_with_invalid_txs(size);
 
         let sk = SecretKey::new(&mut rand::rng());
-        let shreds = match RegularShredder::shred(&slice, &sk) {
+        let mut shredder = RegularShredder::default();
+        let shreds = match shredder.shred(slice, &sk) {
             Ok(s) => s,
             Err(e) => {
                 println!("  ✗ Failed to create shreds: {:?}", e);
@@ -136,9 +126,7 @@ pub async fn bandwidth_test(config: RadioConfig) {
         let start = tokio::time::Instant::now();
 
         for shred in &shreds {
-            if let Ok(serialized) =
-                bincode::serde::encode_to_vec(shred, bincode::config::standard())
-            {
+            if let Ok(serialized) = wincode::serialize(&**shred) {
                 total_bytes += serialized.len();
                 for (i, chunk) in serialized.chunks(config.mtu).enumerate() {
                     //println!("  [DEBUG] Sending chunk {} of size {}...", i, chunk.len());
@@ -243,11 +231,11 @@ pub async fn multi_node_consensus_simulation(num_nodes: usize) {
     use tokio::time::Duration;
 
     println!("\n>> Multi-Node Alpenglow Consensus Simulation <<");
-    let a2a_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let dis_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let rep_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let rep_req_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let txs_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
+    let a2a_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let dis_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let rep_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let rep_req_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let txs_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
 
     let mut rng = rand::rng();
     let mut sks = Vec::new();
@@ -311,14 +299,10 @@ pub async fn multi_node_consensus_simulation(num_nodes: usize) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 for (i, pool, blockstore) in &pools_and_blockstores {
                     let finalized = pool.read().await.finalized_slot();
-                    let prune_slot = finalized.saturating_sub(200);
-                    pool.write().await.prune();
-                    blockstore.write().await.prune(prune_slot);
+                    pool.write().await.prune_old_slots();
+                    blockstore.write().await.clean_beyond_finalized(finalized);
                     let pool_guard = pool.read().await;
-                    let blockstore_guard = blockstore.read().await;
                     println!("pool slot_states: {}", pool_guard.slot_states_len());
-                    println!("blockstore blocks: {}", blockstore_guard.blocks_len());
-                    println!("blockstore shreds: {}", blockstore_guard.shreds_len());
                 }
             }
         })
@@ -347,7 +331,11 @@ pub async fn multi_node_consensus_simulation_with_api(
     updates_tx: tokio::sync::broadcast::Sender<rpc::WebSocketUpdate>,
     blockstore_ref: std::sync::Arc<
         tokio::sync::RwLock<
-            Option<std::sync::Arc<tokio::sync::RwLock<bunkerglow::consensus::Blockstore>>>,
+            Option<
+                std::sync::Arc<
+                    tokio::sync::RwLock<Box<dyn bunkerglow::consensus::Blockstore + Send + Sync>>,
+                >,
+            >,
         >,
     >,
     execution_state: std::sync::Arc<tokio::sync::RwLock<bunker_coin_core::execution::State>>,
@@ -369,11 +357,11 @@ pub async fn multi_node_consensus_simulation_with_api(
     log::info!(">> Multi-Node Alpenglow Consensus Simulation <<");
     println!("\n>> Multi-Node Alpenglow Consensus Simulation <<");
 
-    let a2a_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let dis_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let rep_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let rep_req_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
-    let txs_core = Arc::new(SimulatedNetworkCore::new().with_packet_loss(0.05));
+    let a2a_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let dis_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let rep_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let rep_req_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
+    let txs_core = Arc::new(SimulatedNetworkCore::new(200, 50.0, 0.05));
 
     let mut rng = rand::rng();
     let mut sks = Vec::new();
@@ -489,12 +477,12 @@ pub async fn multi_node_consensus_simulation_with_api(
                 for (i, pool, _) in &pools_and_blockstores {
                     let pool_guard = pool.read().await;
                     let finalized = pool_guard.finalized_slot();
-                    let pool_finalized = finalized;
                     drop(pool_guard);
 
-                    nodes_guard[*i].finalized_slot = finalized;
-                    highest_finalized = highest_finalized.max(finalized);
-                    all_finalized_slots.push((i, finalized));
+                    let finalized_u64 = finalized.inner();
+                    nodes_guard[*i].finalized_slot = finalized_u64;
+                    highest_finalized = highest_finalized.max(finalized_u64);
+                    all_finalized_slots.push((i, finalized_u64));
                 }
 
                 let min_finalized = all_finalized_slots
@@ -577,11 +565,13 @@ pub async fn multi_node_consensus_simulation_with_api(
                 };
 
                 for slot in non_finalized_slots {
-                    let has_block = blockstore_guard.canonical_block_hash(slot).is_some();
-                    let is_skip_certified = pool_guard.is_skip_certified(slot);
-                    let is_finalized = pool_guard.is_finalized(slot);
-                    let is_notarized = pool_guard.is_notarized(slot);
-                    let is_notarized_fallback = pool_guard.is_notarized_fallback(slot);
+                    let slot_id = Slot::new(slot);
+                    let has_block = blockstore_guard.canonical_block_hash(slot_id).is_some();
+                    let is_skip_certified = pool_guard.has_skip_cert(slot_id);
+                    let is_finalized = pool_guard.has_final_cert(slot_id);
+                    let is_notarized = pool_guard.has_notar_cert(slot_id);
+                    let is_notarized_fallback =
+                        pool_guard.has_notar_or_fallback_cert(slot_id) && !is_notarized;
 
                     if slot == 61 {
                         println!("\nfull logging slot >> {}", slot);
@@ -591,17 +581,15 @@ pub async fn multi_node_consensus_simulation_with_api(
                         println!("  is_notarized: {}", is_notarized);
                         println!("  is_notarized_fallback: {}", is_notarized_fallback);
 
-                        if let Some(hash) = blockstore_guard.canonical_block_hash(slot) {
+                        if let Some(hash) = blockstore_guard.canonical_block_hash(slot_id) {
                             println!("  canonical_hash: {}", hex::encode(hash));
 
                             let finalized_slot = pool_guard.finalized_slot();
-                            let tip = pool_guard.get_tip();
                             println!("  pool finalized_slot: {}", finalized_slot);
-                            println!("  pool tip: {}", tip);
                             println!(
                                 "  slot vs finalized: {} ({})",
-                                slot <= finalized_slot,
-                                if slot <= finalized_slot {
+                                slot_id <= finalized_slot,
+                                if slot_id <= finalized_slot {
                                     "should be finalized"
                                 } else {
                                     "not yet finalized"
@@ -621,7 +609,7 @@ pub async fn multi_node_consensus_simulation_with_api(
                     }
 
                     let pool_finalized_slot = pool_guard.finalized_slot();
-                    let finalized_by_cert = is_finalized && pool_finalized_slot >= slot;
+                    let finalized_by_cert = is_finalized && pool_finalized_slot >= slot_id;
 
                     let current_status = if finalized_by_cert || is_skip_certified {
                         rpc::SlotStatus::Finalized
@@ -702,18 +690,20 @@ pub async fn multi_node_consensus_simulation_with_api(
                             };
                             blocks_guard.push(skip_block.clone());
                         } else if has_block {
-                            if let Some(hash) = blockstore_guard.canonical_block_hash(slot) {
-                                if let Some(block) = blockstore_guard.get_block(slot, hash) {
+                            if let Some(hash) = blockstore_guard.canonical_block_hash(slot_id) {
+                                let block_hash: DoubleMerkleRoot = hash.clone().into();
+                                let block_id = (slot_id, block_hash);
+                                if let Some(block) = blockstore_guard.get_block(&block_id) {
                                     let h = hex::encode(hash);
-                                    let parent_hash = hex::encode(block.parent_hash());
-                                    let parent_slot = block.parent();
+                                    let parent_hash = hex::encode(block.parent_hash().as_hash());
+                                    let parent_slot = block.parent().inner();
 
                                     println!(
                                         "Slot {} has new block (status: {:?})",
                                         slot, current_status
                                     );
 
-                                    let leader = epoch_info.leader(slot).id;
+                                    let leader = epoch_info.leader(slot_id).id;
                                     let now = SystemTime::now()
                                         .duration_since(UNIX_EPOCH)
                                         .unwrap()
@@ -779,8 +769,11 @@ pub async fn multi_node_consensus_simulation_with_api(
                     let (_i, _pool, blockstore) = &pools_and_blockstores[0];
                     if let Ok(bs) = blockstore.try_read() {
                         for slot in (last_executed_slot + 1)..=consensus_finalized_slot {
-                            if let Some(hash) = bs.canonical_block_hash(slot) {
-                                if let Some(block) = bs.get_block(slot, hash) {
+                            let slot_id = Slot::new(slot);
+                            if let Some(hash) = bs.canonical_block_hash(slot_id) {
+                                let block_hash: DoubleMerkleRoot = hash.into();
+                                let block_id = (slot_id, block_hash);
+                                if let Some(block) = bs.get_block(&block_id) {
                                     let raw_txs = block.transactions();
                                     let core_txs: Vec<bunker_coin_core::transaction::Transaction> =
                                         raw_txs
@@ -817,14 +810,10 @@ pub async fn multi_node_consensus_simulation_with_api(
 
                 for (_i, pool, blockstore) in &pools_and_blockstores {
                     let finalized = pool.read().await.finalized_slot();
-                    let prune_slot = finalized.saturating_sub(200);
-                    pool.write().await.prune();
-                    blockstore.write().await.prune(prune_slot);
+                    pool.write().await.prune_old_slots();
+                    blockstore.write().await.clean_beyond_finalized(finalized);
                     let pool_guard = pool.read().await;
-                    let blockstore_guard = blockstore.read().await;
                     println!("Pool slot_states: {}", pool_guard.slot_states_len());
-                    println!("Blockstore blocks: {}", blockstore_guard.blocks_len());
-                    println!("Blockstore shreds: {}", blockstore_guard.shreds_len());
                 }
             }
         })
